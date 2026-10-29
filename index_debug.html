@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <base href="https://cdn.jsdelivr.net/gh/web-ports/cuphead@c9ff1b6b16f9d402b78a42fc2200e1c076c0ab6e/">
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | Cuphead</title>
+    <style>
+      body { background-color: black; margin: 0; padding: 0; overflow: hidden; }
+      #gameContainer { width: 100vw !important; height: 100vh !important; }
+      canvas { width: 100% !important; height: 100% !important; }
+
+      /* ---------- Loading overlay ---------- */
+      #loading-overlay { position: fixed; top: 0; left: 0; right: 0; z-index: 10; padding: 20px 5vw 0; pointer-events: none; }
+      #loading-text {
+        font-weight: bold; font-size: 48px; font-family: cursive; text-align: center; color: white;
+        background: linear-gradient(270deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #8f00ff);
+        background-size: 400% 400%;
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: rainbow 3s ease infinite;
+      }
+      @keyframes rainbow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+      #progress-wrap { margin: 18px auto 0; max-width: 900px; }
+      #progress-track { height: 26px; border: 2px solid #fff; border-radius: 14px; background: #111; overflow: hidden; position: relative; }
+      #progress-fill {
+        height: 100%; width: 0%;
+        background: linear-gradient(90deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #8f00ff);
+        background-size: 900px 100%; transition: width 0.15s linear;
+      }
+      #progress-pct {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        font: bold 14px monospace; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
+      }
+      #progress-info { margin-top: 10px; text-align: center; font: 15px/1.5 monospace; color: #ddd; }
+      #progress-parts { color: #7CFC00; }
+      #progress-error { color: #ff5555; font-weight: bold; }
+
+      /* ---------- Debug terminal ---------- */
+      #debug-terminal {
+        position: fixed; left: 0; right: 0; bottom: 0; height: 40vh; z-index: 20; display: none; flex-direction: column;
+        background: rgba(0, 0, 0, 0.88); border-top: 2px solid #00ff66;
+        font: 12px/1.4 Consolas, "Courier New", monospace; color: #00ff66;
+      }
+      #debug-terminal.visible { display: flex; }
+      #debug-header { display: flex; justify-content: space-between; padding: 3px 10px; background: #003a1a; color: #aaffcc; flex: 0 0 auto; }
+      #debug-log { flex: 1 1 auto; overflow-y: auto; padding: 6px 10px; white-space: pre-wrap; word-break: break-all; }
+      #debug-log .warn { color: #ffcc00; }
+      #debug-log .err { color: #ff5555; }
+      #debug-log .info { color: #66ccff; }
+      #debug-log .ok { color: #66ff99; font-weight: bold; }
+      #debug-log .hint { color: #ff99ff; font-weight: bold; }
+      #debug-log .time { color: #558866; font-weight: normal; }
+      #debug-terminal.ingame:not(.forced) { pointer-events: none; }
+      #debug-header .right { display: flex; align-items: center; gap: 12px; }
+      .dbtn {
+        font: 12px Consolas, "Courier New", monospace; color: #00ff66; background: #001a0d;
+        border: 1px solid #00ff66; border-radius: 4px; padding: 2px 10px; cursor: pointer;
+      }
+      .dbtn:hover, .dbtn.ok { background: #00ff66; color: #000; }
+    </style>
+  </head>
+  <body>
+    <div id="loading-overlay">
+      <div id="loading-text">LOADING...</div>
+      <div id="progress-wrap">
+        <div id="progress-track">
+          <div id="progress-fill"></div>
+          <div id="progress-pct">0%</div>
+        </div>
+        <div id="progress-info">
+          <div id="progress-size">0.00 MB / 2101.31 MB</div>
+          <div id="progress-parts">Waiting for downloads...</div>
+          <div id="progress-error"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="gameContainer"></div>
+
+    <div id="debug-terminal">
+      <div id="debug-header">
+        <span>DEBUG TERMINAL</span>
+        <span class="right">
+          <span>type "debug" to toggle</span>
+          <button id="debug-verify" class="dbtn" type="button" title="Reload and check every file for corruption + Unity versions">Deep verify</button>
+          <button id="debug-clear" class="dbtn" type="button" title="Delete the cached game files and reload">Clear cache</button>
+          <button id="debug-copy" class="dbtn" type="button">Copy all</button>
+        </span>
+      </div>
+      <div id="debug-log"></div>
+    </div>
+
+    <script src="Build/UnityLoader.js"></script>
+    <script>
+    /* =====================================================
+       URL options
+         ?verify         full integrity + Unity-version check (slow, decompresses everything)
+         ?verify=quick   only read the headers of the serialized files (faster)
+         ?nocache        do not read or write the browser cache
+         ?clearcache     delete this build's cache before starting
+         ?skipasm        do not download the asm.js fallback (wasm browsers don't need it)
+         ?concurrency=N  parallel part downloads (default 8)
+       ===================================================== */
+    const params = new URLSearchParams(location.search);
+    const OPT = {
+      verify: params.has("verify") ? (params.get("verify") || "full") : false,
+      nocache: params.has("nocache"),
+      clearcache: params.has("clearcache"),
+      skipAsm: params.has("skipasm"),
+      concurrency: Math.max(1, Math.min(32, parseInt(params.get("concurrency"), 10) || 8))
+    };
+
+    /* =====================================================
+       Debug terminal
+       ===================================================== */
+    const terminal = document.getElementById("debug-terminal");
+    const logBox = document.getElementById("debug-log");
+    const MAX_LINES = 800;
+    let debugForced = false;
+    let gameRunning = false;
+
+    function ts() {
+      const d = new Date();
+      return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
+    }
+
+    const logHistory = [];
+    const MAX_HISTORY = 20000;
+
+    function termLog(msg, cls) {
+      logHistory.push("[" + ts() + "] " + (cls === "err" ? "ERROR: " : cls === "warn" ? "WARN: " : "") + String(msg));
+      if (logHistory.length > MAX_HISTORY) logHistory.shift();
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      const t = document.createElement("span");
+      t.className = "time";
+      t.textContent = "[" + ts() + "] ";
+      line.appendChild(t);
+      line.appendChild(document.createTextNode(String(msg)));
+      logBox.appendChild(line);
+      while (logBox.childNodes.length > MAX_LINES) logBox.removeChild(logBox.firstChild);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function updateTerminalVisibility() {
+      const show = !gameRunning || debugForced;
+      terminal.classList.toggle("visible", show);
+      terminal.classList.toggle("ingame", gameRunning);
+      terminal.classList.toggle("forced", debugForced);
+      if (show) logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+      return new Promise(function (resolve, reject) {
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy") ? resolve() : reject(new Error("execCommand failed")); }
+        catch (e) { reject(e); } finally { ta.remove(); }
+      });
+    }
+
+    const copyBtn = document.getElementById("debug-copy");
+    copyBtn.addEventListener("click", function () {
+      copyText(logHistory.join("\n")).then(function () {
+        copyBtn.textContent = "Copied " + logHistory.length + " lines!";
+        copyBtn.classList.add("ok");
+      }).catch(function (e) {
+        copyBtn.textContent = "Copy failed";
+        termLog("Copy failed: " + e.message, "err");
+      }).finally(function () {
+        setTimeout(function () { copyBtn.textContent = "Copy all"; copyBtn.classList.remove("ok"); }, 2000);
+      });
+    });
+
+    document.getElementById("debug-verify").addEventListener("click", function () {
+      location.search = "?verify";
+    });
+    document.getElementById("debug-clear").addEventListener("click", async function () {
+      try {
+        const names = await caches.keys();
+        for (const n of names) if (n.indexOf("cuphead-cache") === 0) await caches.delete(n);
+        termLog("Cache cleared (" + names.length + " cache(s) checked). Reloading...", "info");
+      } catch (e) { termLog("Could not clear cache: " + e.message, "err"); }
+      location.reload();
+    });
+
+    // Hints triggered by well-known error messages
+    const hinted = {};
+    function hintFor(text) {
+      const rules = [
+        [/newer version of Unity|higher SerializedFile version/i, "newer",
+          "HINT: Unity says the data is newer than the runtime. This is often a CORRUPT or MIXED download rather than a real version gap. Click 'Deep verify' (or add ?verify to the URL) to read the real versions and check file integrity."],
+        [/Unable to decode audio data|Decode error/i, "audio",
+          "HINT: audio failed to decode. See the [audio #n] lines above: if the header is not OggS/RIFF/MP3 the data is corrupt, otherwise it is a browser codec issue."],
+        [/Out of memory|Cannot enlarge memory|memory allocation/i, "mem",
+          "HINT: the page ran out of memory. Close other tabs, use a 64-bit browser, and make sure you have several GB free."]
+      ];
+      for (const r of rules) {
+        if (r[0].test(text) && !hinted[r[1]]) { hinted[r[1]] = true; termLog(r[2], "hint"); }
+      }
+    }
+
+    // Mirror browser console + errors into the terminal
+    ["log", "info", "warn", "error"].forEach(function (level) {
+      const original = console[level];
+      console[level] = function () {
+        try {
+          const text = Array.prototype.map.call(arguments, function (a) {
+            if (typeof a === "string") return a;
+            try { return JSON.stringify(a); } catch (e) { return String(a); }
+          }).join(" ");
+          termLog(text, level === "error" ? "err" : level === "warn" ? "warn" : "");
+          hintFor(text);
+        } catch (e) {}
+        original.apply(console, arguments);
+      };
+    });
+    window.addEventListener("error", function (e) {
+      termLog("Uncaught: " + e.message + (e.filename ? " (" + e.filename + ":" + e.lineno + ")" : ""), "err");
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      const r = e.reason;
+      const text = (r && r.name ? r.name + ": " : "") + (r && r.message ? r.message : r);
+      termLog("Unhandled promise rejection: " + text, "err");
+      hintFor(text);
+    });
+
+    let keyBuffer = "";
+    window.addEventListener("keydown", function (e) {
+      if (e.ctrlKey || e.altKey || e.metaKey || !e.key || e.key.length !== 1) return;
+      keyBuffer = (keyBuffer + e.key.toLowerCase()).slice(-5);
+      if (keyBuffer === "debug") {
+        keyBuffer = "";
+        debugForced = !debugForced;
+        termLog("Debug terminal " + (debugForced ? "forced ON" : "forced OFF"), "info");
+        updateTerminalVisibility();
+      }
+    }, true);
+
+    updateTerminalVisibility();
+    termLog("Debug terminal ready. Loader started.", "info");
+
+    /* =====================================================
+       Audio decode spy: shows WHICH blob fails and what it really is
+       ===================================================== */
+    (function () {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { termLog("No Web Audio API in this browser", "err"); return; }
+      const orig = AC.prototype.decodeAudioData;
+      let n = 0, okCount = 0;
+      AC.prototype.decodeAudioData = function (buf, ok, fail) {
+        const id = ++n;
+        const u = new Uint8Array(buf.slice(0, 12));
+        const hex = Array.from(u).map(function (b) { return b.toString(16).padStart(2, "0"); }).join(" ");
+        const ascii = Array.from(u).map(function (b) { return b > 31 && b < 127 ? String.fromCharCode(b) : "."; }).join("");
+        const kind = ascii.indexOf("OggS") === 0 ? "Ogg" : ascii.indexOf("RIFF") === 0 ? "WAV" :
+          (ascii.indexOf("ID3") === 0 || (u[0] === 0xFF && (u[1] & 0xE0) === 0xE0)) ? "MP3" : "UNKNOWN";
+        const size = buf.byteLength;
+        const p = orig.call(this, buf, function (r) { okCount++; if (ok) ok(r); }, function (e) {
+          termLog("[audio #" + id + "] FAILED: " + kind + ", " + size + " bytes, header " + hex + ' "' + ascii + '"', "err");
+          if (fail) fail(e);
+        });
+        if (p && p.catch) p.catch(function () { /* reported above or via unhandledrejection */ });
+        return p;
+      };
+    })();
+
+    /* =====================================================
+       Build id / cache naming
+       The old page cached files under just their file name, so files from an older build
+       could be silently mixed with a newer build. The cache is now keyed by the commit
+       hash that is in the <base href>.
+       ===================================================== */
+    const baseHref = (document.querySelector("base") || {}).href || location.href;
+    const BUILD_ID = (baseHref.match(/@([0-9a-f]{7,40})/i) || [])[1] || "local";
+    const CACHE_NAME = "cuphead-cache-" + BUILD_ID.slice(0, 12);
+    const CACHE_ORIGIN = "https://cache.local/" + BUILD_ID + "/";
+
+    /* =====================================================
+       Loading UI
+       ===================================================== */
+    const loadingOverlay = document.getElementById("loading-overlay");
+    const loadingText = document.getElementById("loading-text");
+    const fillEl = document.getElementById("progress-fill");
+    const pctEl = document.getElementById("progress-pct");
+    const sizeEl = document.getElementById("progress-size");
+    const partsEl = document.getElementById("progress-parts");
+    const errorEl = document.getElementById("progress-error");
+
+    const TOTAL_MB = 2101.31;
+    const TOTAL_BYTES = TOTAL_MB * 1024 * 1024;
+
+    const groups = [
+      { id: "data", file: "Build/CupheadPort.data.unityweb",      start: 1, end: 103 },
+      { id: "wasm", file: "Build/CupheadPort.wasm.code.unityweb", start: 1, end: 2 },
+      { id: "asm",  file: "Build/CupheadPort.asm.code.unityweb",  start: 1, end: 3, skip: OPT.skipAsm }
+    ];
+    const state = {};
+    let totalParts = 0;
+    groups.forEach(function (g) {
+      const count = g.end - g.start + 1;
+      totalParts += count;
+      state[g.id] = { total: count, done: 0, active: new Set(), cached: false, skipped: false };
+    });
+
+    let loadedBytes = 0;
+    let doneParts = 0;
+    let uiQueued = false;
+    let phase = "download";
+    let aborted = false;
+
+    function fmtMB(b) { return (b / (1024 * 1024)).toFixed(2); }
+    function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+    function renderUI() {
+      uiQueued = false;
+      if (phase !== "download") return;
+      const pct = Math.min(100, (loadedBytes / TOTAL_BYTES) * 100);
+      fillEl.style.width = pct.toFixed(2) + "%";
+      pctEl.textContent = pct.toFixed(1) + "%";
+      loadingText.textContent = "LOADING...";
+      sizeEl.textContent = fmtMB(loadedBytes) + " MB / " + TOTAL_MB.toFixed(2) + " MB";
+      const bits = groups.map(function (g) {
+        const s = state[g.id];
+        if (s.skipped) return g.id + ": skipped";
+        if (s.cached) return g.id + ": cached";
+        if (s.done >= s.total) return g.id + ": " + s.total + "/" + s.total + " \u2713";
+        const cur = s.active.size ? Math.min.apply(null, Array.from(s.active)) : s.done + 1;
+        return g.id + ": part " + cur + "/" + s.total + (s.active.size > 1 ? " (+" + (s.active.size - 1) + " active)" : "");
+      });
+      partsEl.textContent = "Parts done " + doneParts + "/" + totalParts + "  |  " + bits.join("  |  ");
+    }
+    function queueUI() { if (!uiQueued) { uiQueued = true; requestAnimationFrame(renderUI); } }
+
+    /* =====================================================
+       Environment report
+       ===================================================== */
+    function logEnvironment() {
+      termLog("Page: " + location.href);
+      termLog("Base: " + document.baseURI);
+      termLog("Build id: " + BUILD_ID + "  |  cache: " + CACHE_NAME, "info");
+      termLog("Options: " + JSON.stringify(OPT));
+      termLog("UA: " + navigator.userAgent);
+      termLog("WebAssembly: " + (typeof WebAssembly !== "undefined") + ", DecompressionStream: " + (typeof DecompressionStream !== "undefined") +
+        ", secure context: " + window.isSecureContext + ", deviceMemory: " + (navigator.deviceMemory || "n/a") + " GB");
+      try {
+        const c = document.createElement("canvas");
+        termLog("WebGL2: " + !!c.getContext("webgl2") + ", WebGL1: " + !!c.getContext("webgl"));
+      } catch (e) {}
+      if (navigator.storage && navigator.storage.estimate) {
+        navigator.storage.estimate().then(function (e) {
+          const tooSmall = e.quota && e.quota < TOTAL_BYTES * 1.1;
+          termLog("Storage: " + fmtMB(e.usage || 0) + " MB used of " + fmtMB(e.quota || 0) + " MB quota" +
+            (tooSmall ? "  -> quota is smaller than the game, caching will fail (the game still runs, it just re-downloads each visit)" : ""),
+            tooSmall ? "warn" : "");
+        }).catch(function () {});
+      }
+    }
+
+    /* =====================================================
+       Manifest + loader sanity check
+       ===================================================== */
+    async function checkManifest() {
+      try {
+        const r = await fetch("Build/CupheadPort.json", { cache: "no-store" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const text = await r.text();
+        termLog("Manifest Build/CupheadPort.json: " + text.replace(/\s+/g, " ").slice(0, 600));
+        const j = JSON.parse(text);
+        const expected = ["CupheadPort.data.unityweb", "CupheadPort.wasm.code.unityweb", "CupheadPort.asm.code.unityweb"];
+        const refs = Object.keys(j).filter(function (k) { return /Url$/.test(k); }).map(function (k) { return String(j[k]); });
+        expected.forEach(function (name) {
+          const hit = refs.some(function (u) { return u.indexOf(name) !== -1; });
+          if (!hit) termLog("Manifest does not reference " + name + " - the XHR redirect to the merged file will never fire", "warn");
+        });
+      } catch (e) { termLog("Could not read the manifest: " + e.message, "warn"); }
+      try {
+        const r = await fetch("Build/UnityLoader.js");
+        const t = await r.text();
+        const v = t.match(/\b20\d\d\.\d+\.\d+[fpab]\d+\b/g);
+        termLog("UnityLoader.js: " + t.length + " bytes, version strings found: " + (v ? Array.from(new Set(v)).join(", ") : "none"));
+      } catch (e) { termLog("Could not inspect UnityLoader.js: " + e.message, "warn"); }
+    }
+
+    /* =====================================================
+       XHR spy + redirect to the merged blobs
+       ===================================================== */
+    const redirects = {};      // file name -> blob: url
+    const redirectHits = {};
+    (function () {
+      const originalOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        let u = String(url);
+        let matched = null;
+        for (const name in redirects) {
+          if (u.indexOf(name) !== -1) { matched = name; u = redirects[name]; redirectHits[name]++; break; }
+        }
+        if (matched || /Build\//.test(u)) {
+          const xhr = this, label = matched ? matched + " (merged blob)" : u;
+          termLog("XHR " + method + " " + label);
+          xhr.addEventListener("loadend", function () {
+            let size = "";
+            try {
+              if (xhr.responseType === "arraybuffer" && xhr.response) size = ", " + fmtMB(xhr.response.byteLength) + " MB";
+              else if (xhr.responseType === "blob" && xhr.response) size = ", " + fmtMB(xhr.response.size) + " MB";
+            } catch (e) {}
+            termLog("XHR done " + label + " -> status " + xhr.status + size, xhr.status === 200 || xhr.status === 0 && size ? "" : "err");
+          });
+        }
+        arguments[1] = u;
+        return originalOpen.apply(this, arguments);
+      };
+    })();
+
+    /* =====================================================
+       Downloading (limited concurrency, retries, validation)
+       ===================================================== */
+    let running = 0;
+    const waiters = [];
+    async function acquire() {
+      if (running < OPT.concurrency) { running++; return; }
+      await new Promise(function (r) { waiters.push(r); });   // slot is handed over by release()
+    }
+    function release() {
+      const w = waiters.shift();
+      if (w) w(); else running--;
+    }
+
+    const IDLE_TIMEOUT_MS = 30000;
+    const MAX_ATTEMPTS = 4;
+
+    async function fetchPartOnce(url, label, attempt, tracker) {
+      const ac = new AbortController();
+      let timer = null;
+      const arm = function () { clearTimeout(timer); timer = setTimeout(function () { ac.abort(); }, IDLE_TIMEOUT_MS); };
+      arm();
+      try {
+        let response;
+        try {
+          response = await fetch(url, { signal: ac.signal, cache: attempt > 1 ? "reload" : "default" });
+        } catch (e) {
+          if (ac.signal.aborted) throw new Error("stalled: no response for " + IDLE_TIMEOUT_MS / 1000 + "s");
+          throw e;
+        }
+        if (!response.ok) throw new Error("HTTP " + response.status + " " + response.statusText);
+        const ct = response.headers.get("content-type") || "";
+        if (/text\/html/i.test(ct)) throw new Error("server sent an HTML page instead of data (content-type " + ct + ")");
+        const enc = response.headers.get("content-encoding");
+        const expected = enc ? 0 : parseInt(response.headers.get("content-length"), 10) || 0;
+
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        try {
+          while (true) {
+            arm();
+            const r = await reader.read();
+            if (r.done) break;
+            received += r.value.length;
+            tracker.bytes += r.value.length;
+            loadedBytes += r.value.length;
+            chunks.push(r.value);
+            queueUI();
+          }
+        } catch (e) {
+          if (ac.signal.aborted) throw new Error("stalled: no data for " + IDLE_TIMEOUT_MS / 1000 + "s");
+          throw e;
+        }
+        if (received === 0) throw new Error("empty response");
+        if (expected && received !== expected) throw new Error("truncated: got " + received + " of " + expected + " bytes");
+
+        const blob = new Blob(chunks);
+        const head = await blob.slice(0, 64).text();
+        if (/^\s*<(!doctype|html|\?xml)/i.test(head) || /^(Not Found|Couldn't find|Rate limit|Too Many Requests|Bad Gateway)/i.test(head)) {
+          throw new Error("body is an error page, not data: " + JSON.stringify(head.slice(0, 40)));
+        }
+        return blob;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function fetchPart(url, groupId, partNo) {
+      const label = groupId + " part " + partNo;
+      const s = state[groupId];
+      s.active.add(partNo);
+      termLog("START  " + label + "  <- " + url);
+      queueUI();
+      try {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          if (aborted) throw new Error("aborted");
+          const tracker = { bytes: 0 };
+          try {
+            const blob = await fetchPartOnce(url, label, attempt, tracker);
+            s.done++; doneParts++;
+            termLog("DONE   " + label + "  (" + fmtMB(blob.size) + " MB, " + blob.size + " bytes)  [" + doneParts + "/" + totalParts + "]" +
+              (attempt > 1 ? "  after " + attempt + " attempts" : ""));
+            return blob;
+          } catch (err) {
+            loadedBytes -= tracker.bytes;      // do not count the failed attempt in the progress bar
+            if (attempt >= MAX_ATTEMPTS || aborted) {
+              termLog("FAILED " + label + ": " + err.message, "err");
+              errorEl.textContent = "Failed on " + label + ": " + err.message;
+              throw err;
+            }
+            const wait = 600 * Math.pow(2, attempt - 1);
+            termLog("RETRY  " + label + " (attempt " + attempt + "/" + MAX_ATTEMPTS + " failed: " + err.message + ") in " + wait + " ms", "warn");
+            await sleep(wait);
+          }
+        }
+      } finally {
+        s.active.delete(partNo);
+        queueUI();
+      }
+    }
+
+    async function downloadGroup(group) {
+      const n = group.end - group.start + 1;
+      const blobs = new Array(n);
+      await Promise.all(Array.from({ length: n }, async function (_, i) {
+        await acquire();
+        try {
+          if (aborted) return;
+          blobs[i] = await fetchPart(group.file + ".part" + (group.start + i), group.id, group.start + i);
+        } finally { release(); }
+      }));
+
+      // Part-size consistency: split files have equal-sized parts except the last one
+      const sizes = blobs.map(function (b) { return b.size; });
+      if (n > 2) {
+        const counts = {};
+        sizes.slice(0, -1).forEach(function (s) { counts[s] = (counts[s] || 0) + 1; });
+        const modal = +Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; })[0];
+        sizes.forEach(function (s, i) {
+          if (i < n - 1 && s !== modal) {
+            termLog(group.id + " part " + (group.start + i) + " is " + s + " bytes but most parts are " + modal + " -> suspicious (truncated or wrong file)", "warn");
+          }
+        });
+      }
+      const sum = sizes.reduce(function (a, b) { return a + b; }, 0);
+      const merged = new Blob(blobs);
+      termLog("MERGED " + group.id + " -> " + fmtMB(merged.size) + " MB (" + merged.size + " bytes) from " + n + " part(s)", "info");
+      if (merged.size !== sum) termLog("Merged size " + merged.size + " != sum of parts " + sum, "err");
+      return merged;
+    }
+
+    /* =====================================================
+       Cache (versioned, size-validated)
+       ===================================================== */
+    async function readCache(cache, key, group) {
+      try {
+        const hit = await cache.match(key);
+        const metaResp = await cache.match(key + ".meta");
+        if (!hit) return null;
+        if (!metaResp) {
+          termLog("CACHE  " + group.id + ": entry has no metadata (written by an older page), discarding", "warn");
+          await cache.delete(key); return null;
+        }
+        const meta = await metaResp.json();
+        const blob = await hit.blob();
+        if (blob.size !== meta.size) {
+          termLog("CACHE  " + group.id + ": size " + blob.size + " != expected " + meta.size + " (partial write?), discarding", "warn");
+          await cache.delete(key); await cache.delete(key + ".meta"); return null;
+        }
+        termLog("CACHE  " + group.id + " loaded from cache (" + fmtMB(blob.size) + " MB, saved " + new Date(meta.time).toLocaleString() + ")", "info");
+        return blob;
+      } catch (e) {
+        termLog("CACHE  read failed for " + group.id + ": " + e.message, "warn");
+        return null;
+      }
+    }
+
+    async function writeCache(cache, key, blob, group) {
+      try {
+        await cache.put(key, new Response(blob));
+        await cache.put(key + ".meta", new Response(JSON.stringify({ size: blob.size, build: BUILD_ID, time: Date.now() })));
+        termLog("CACHED " + group.id + " saved to browser cache", "info");
+      } catch (e) {
+        termLog("Could not cache " + group.id + ": " + e.name + " " + e.message, "warn");
+        try { await cache.delete(key); await cache.delete(key + ".meta"); } catch (e2) {}
+      }
+    }
+
+    async function cleanupOldCaches() {
+      try {
+        const names = await caches.keys();
+        for (const n of names) {
+          if (n.indexOf("cuphead-cache") === 0 && n !== CACHE_NAME) {
+            await caches.delete(n);
+            termLog("Deleted stale cache '" + n + "' (files there were not tied to a build and could be mixed versions)", "warn");
+          }
+        }
+        if (OPT.clearcache) {
+          await caches.delete(CACHE_NAME);
+          termLog("?clearcache: deleted " + CACHE_NAME, "info");
+        }
+      } catch (e) { termLog("Cache API unavailable: " + e.message, "warn"); }
+    }
+
+    /* =====================================================
+       File inspection / integrity verification
+       ===================================================== */
+    async function sniff(blob) {
+      const u8 = new Uint8Array(await blob.slice(0, 48).arrayBuffer());
+      const asc = Array.from(u8).map(function (b) { return b > 31 && b < 127 ? String.fromCharCode(b) : "."; }).join("");
+      let kind = "unknown";
+      if (u8[0] === 0x1f && u8[1] === 0x8b) kind = "gzip";
+      else if (asc.indexOf("UnityWeb Compressed Content (brotli)") === 0) kind = "brotli";
+      else if (asc.indexOf("UnityWebData1.0") === 0) kind = "webdata";
+      else if (u8[0] === 0 && asc.slice(1, 4) === "asm") kind = "wasm";
+      const hex = Array.from(u8.slice(0, 16)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join(" ");
+      return { kind: kind, hex: hex };
+    }
+
+    const diag = { dataVersions: new Set(), runtimeVersions: new Set(), problems: [] };
+    const SERIALIZED_RE = /(^|\/)(globalgamemanagers(\.assets)?|[^\/]+\.assets|level\d+|mainData)$/i;
+
+    function concatBytes(list, total) {
+      const out = new Uint8Array(total);
+      let o = 0;
+      for (const b of list) { out.set(b, o); o += b.length; }
+      return out;
+    }
+
+    function parseTable(bytes, headerSize) {
+      const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const dec = new TextDecoder();
+      const out = [];
+      let p = 20;
+      while (p + 12 <= headerSize) {
+        const off = dv.getUint32(p, true), size = dv.getUint32(p + 4, true), nl = dv.getUint32(p + 8, true);
+        if (p + 12 + nl > headerSize) break;
+        out.push({ name: dec.decode(bytes.subarray(p + 12, p + 12 + nl)), off: off, size: size });
+        p += 12 + nl;
+      }
+      return out;
+    }
+
+    // Unity SerializedFile header (big endian). Returns ok:false if it is garbage.
+    function parseSerialized(u8) {
+      const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+      const version = dv.getUint32(8, false);
+      if (version < 5 || version > 40) return { ok: false, version: version };
+      const strOff = version >= 22 ? 48 : version >= 9 ? 20 : 16;
+      let s = "";
+      for (let i = strOff; i < Math.min(strOff + 40, u8.length) && u8[i]; i++) s += String.fromCharCode(u8[i]);
+      return { ok: /^\d+\.\d+\.\d+[a-z]\d+/.test(s), version: version, unity: s };
+    }
+
+    async function scanStream(stream, opts) {
+      const reader = stream.getReader();
+      const latin = new TextDecoder("latin1");
+      let pos = 0, tableReady = false, headerSize = 0, hbuf = [], hlen = 0;
+      let entries = [], interesting = [], tail = "", quickStopped = false;
+      const versions = new Set();
+
+      function feed(bytes, absStart) {
+        const absEnd = absStart + bytes.length;
+        for (const e of interesting) {
+          const s = Math.max(e.off, absStart);
+          const t = Math.min(e.off + 64, absEnd, e.off + e.size);
+          if (s < t) { e.head.set(bytes.subarray(s - absStart, t - absStart), s - e.off); e.got += t - s; }
+        }
+      }
+
+      while (true) {
+        const r = await reader.read();
+        if (r.done) break;
+        const value = r.value, start = pos;
+        pos += value.length;
+
+        if (opts.findVersion) {
+          const txt = tail + latin.decode(value);
+          const m = txt.match(/\b20\d\d\.\d+\.\d+[fpab]\d+\b/g);
+          if (m) m.forEach(function (v) { versions.add(v); });
+          tail = txt.slice(-24);
+        }
+
+        if (opts.table) {
+          if (!tableReady) {
+            hbuf.push(value); hlen += value.length;
+            if (!headerSize && hlen >= 20) {
+              const first = concatBytes(hbuf, hlen);
+              hbuf = [first];
+              const sig = String.fromCharCode.apply(null, first.subarray(0, 15));
+              if (sig !== "UnityWebData1.0") throw new Error('bad container signature "' + sig.replace(/[^\x20-\x7e]/g, ".") + '" (data is not a UnityWebData file after decompression)');
+              headerSize = new DataView(first.buffer, first.byteOffset).getUint32(16, true);
+              if (headerSize < 20 || headerSize > 64 * 1024 * 1024) throw new Error("implausible header size " + headerSize);
+            }
+            if (headerSize && hlen >= headerSize) {
+              const all = concatBytes(hbuf, hlen);
+              hbuf = null;
+              entries = parseTable(all, headerSize);
+              interesting = entries.filter(function (e) { return SERIALIZED_RE.test(e.name) && e.size >= 24; })
+                .map(function (e) { return { name: e.name, off: e.off, size: e.size, head: new Uint8Array(64), got: 0 }; });
+              tableReady = true;
+              termLog("  container lists " + entries.length + " files, " + interesting.length + " serialized files to inspect");
+              feed(all, 0);
+            }
+          } else {
+            feed(value, start);
+          }
+          if (opts.quick && tableReady && interesting.every(function (e) { return e.got >= Math.min(64, e.size); })) {
+            await reader.cancel();
+            quickStopped = true;
+            break;
+          }
+        }
+      }
+      const expectedEnd = entries.reduce(function (m, e) { return Math.max(m, e.off + e.size); }, 0);
+      return { bytes: pos, expectedEnd: expectedEnd, interesting: interesting, versions: Array.from(versions), quickStopped: quickStopped };
+    }
+
+    async function verifyGroup(group, blob, magic) {
+      const label = group.id;
+      if (magic.kind === "brotli") {
+        termLog("VERIFY " + label + ": brotli-compressed, the browser cannot decompress this natively, skipping deep check", "warn");
+        return true;
+      }
+      let stream = blob.stream();
+      if (magic.kind === "gzip") {
+        if (typeof DecompressionStream === "undefined") { termLog("VERIFY " + label + ": this browser has no DecompressionStream, skipping", "warn"); return true; }
+        stream = stream.pipeThrough(new DecompressionStream("gzip"));
+      } else if (magic.kind !== "webdata" && magic.kind !== "wasm") {
+        termLog("VERIFY " + label + ": unknown file format, header " + magic.hex, "err");
+        return false;
+      }
+
+      termLog("VERIFY " + label + ": reading (" + magic.kind + ")...", "info");
+      const t0 = performance.now();
+      let res;
+      try {
+        res = await scanStream(stream, { table: group.id === "data", findVersion: group.id !== "data", quick: OPT.verify === "quick" });
+      } catch (e) {
+        termLog("VERIFY " + label + " FAILED: " + e.message + "  -> the file is truncated or corrupt (gzip CRC/length check or container check failed)", "err");
+        diag.problems.push(label + " failed integrity check");
+        return false;
+      }
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      termLog("VERIFY " + label + ": " + fmtMB(res.bytes) + " MB " + (magic.kind === "gzip" ? "decompressed" : "read") + " in " + secs + " s" +
+        (res.quickStopped ? " (quick mode, stopped after headers)" : magic.kind === "gzip" ? ", gzip CRC and length OK" : ""), "ok");
+
+      let good = true;
+      if (group.id === "data") {
+        if (!res.quickStopped && res.expectedEnd && res.bytes < res.expectedEnd) {
+          termLog("  data ends at " + res.bytes + " but the container table expects " + res.expectedEnd + " bytes -> TRUNCATED", "err");
+          good = false;
+        }
+        res.interesting.forEach(function (e) {
+          const info = e.got >= 24 ? parseSerialized(e.head) : null;
+          if (info && info.ok) {
+            termLog("  " + e.name + ": SerializedFile v" + info.version + ", built with Unity " + info.unity, "ok");
+            diag.dataVersions.add(info.unity);
+          } else {
+            const hex = Array.from(e.head.slice(0, 24)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join(" ");
+            termLog("  " + e.name + ": header is GARBAGE (" + hex + ") -> the data is corrupt or misaligned. An error like 'newer version of Unity' would be a symptom of this, not a real version gap.", "err");
+            good = false;
+          }
+        });
+      } else {
+        termLog("  version strings in " + label + " runtime: " + (res.versions.join(", ") || "none found"), "ok");
+        res.versions.forEach(function (v) { diag.runtimeVersions.add(v); });
+      }
+      if (!good) diag.problems.push(label + " has invalid content");
+      return good;
+    }
+
+    function summarize() {
+      termLog("========== SUMMARY ==========", "info");
+      const d = Array.from(diag.dataVersions), r = Array.from(diag.runtimeVersions);
+      termLog("Data built with Unity: " + (d.join(", ") || "unknown (run Deep verify)"));
+      termLog("Runtime (wasm/asm) strings: " + (r.join(", ") || "unknown (run Deep verify)"));
+      if (d.length && r.length) {
+        const match = d.some(function (v) { return r.indexOf(v) !== -1; });
+        if (match) termLog("Versions match.", "ok");
+        else termLog("VERSION MISMATCH: the data and the runtime come from different Unity builds. The runtime files (wasm/asm/UnityLoader) must come from the same build as the data.", "err");
+      }
+      diag.problems.forEach(function (p) { termLog("PROBLEM: " + p, "err"); });
+      if (!diag.problems.length) termLog("No file-level problems detected.", "ok");
+      termLog("=============================", "info");
+    }
+
+    /* =====================================================
+       Per-group processing
+       ===================================================== */
+    async function processGroup(group) {
+      const s = state[group.id];
+      if (group.skip) {
+        s.skipped = true; s.done = s.total; doneParts += s.total;
+        termLog("SKIP   " + group.id + " (?skipasm)", "info");
+        queueUI();
+        return null;
+      }
+      const fileName = group.file.split("/").pop();
+      const key = CACHE_ORIGIN + fileName;
+
+      let cache = null;
+      if (!OPT.nocache) {
+        try { cache = await caches.open(CACHE_NAME); } catch (e) { termLog("Cache API unavailable: " + e.message, "warn"); }
+      }
+
+      let blob = cache ? await readCache(cache, key, group) : null;
+      const fromCache = !!blob;
+      if (fromCache) {
+        s.cached = true; s.done = s.total; doneParts += s.total; loadedBytes += blob.size;
+        queueUI();
+      } else {
+        blob = await downloadGroup(group);
+      }
+
+      const magic = await sniff(blob);
+      const ok = magic.kind !== "unknown";
+      termLog("FORMAT " + group.id + ": " + magic.kind + ", first bytes " + magic.hex, ok ? "" : "err");
+      if (!ok) {
+        diag.problems.push(group.id + " does not look like a Unity file (parts corrupt, mis-ordered or wrong files)");
+      }
+
+      let verified = ok;
+      if (OPT.verify) verified = (await verifyGroup(group, blob, magic)) && ok;
+
+      if (cache) {
+        if (fromCache && OPT.verify && !verified) {
+          termLog("Cached " + group.id + " failed verification, removing it from the cache", "warn");
+          try { await cache.delete(key); await cache.delete(key + ".meta"); } catch (e) {}
+        } else if (!fromCache && verified) {
+          await writeCache(cache, key, blob, group);
+        } else if (!fromCache) {
+          termLog("Not caching " + group.id + " because it looks invalid", "warn");
+        }
+      }
+      return { group: group, url: URL.createObjectURL(blob) };
+    }
+
+    /* =====================================================
+       Boot
+       ===================================================== */
+    function onGameReady() {
+      if (gameRunning) return;
+      gameRunning = true;
+      loadingOverlay.remove();
+      termLog("Game started. Type \"debug\" to toggle this terminal.", "info");
+      updateTerminalVisibility();
+    }
+
+    (async () => {
+      try {
+        logEnvironment();
+        await cleanupOldCaches();
+        await checkManifest();
+
+        const results = await Promise.all(groups.map(processGroup));
+        termLog("All parts downloaded (" + fmtMB(loadedBytes) + " MB).", "info");
+
+        results.forEach(function (r) {
+          if (!r) return;
+          const name = r.group.file.split("/").pop();
+          redirects[name] = r.url;
+          redirectHits[name] = 0;
+        });
+        if (OPT.verify) summarize();
+
+        phase = "init";
+        fillEl.style.width = "100%";
+        pctEl.textContent = "100%";
+        loadingText.textContent = "STARTING GAME...";
+        sizeEl.textContent = "Unpacking and initialising Unity";
+        partsEl.textContent = "Parts done " + totalParts + "/" + totalParts;
+        termLog("Instantiating Unity player...", "info");
+
+        let readyCalled = false;
+        UnityLoader.instantiate("gameContainer", "Build/CupheadPort.json", {
+          onProgress: function (instance, progress) {
+            if (typeof progress === "number") {
+              sizeEl.textContent = "Initialising Unity: " + Math.round(progress * 100) + "%";
+              if (progress >= 1 && !readyCalled) {
+                readyCalled = true;
+                termLog("Unity reported progress 100%.", "info");
+                onGameReady();
+              }
+            }
+          },
+          Module: {
+            onRuntimeInitialized: function () { termLog("Unity runtime initialized", "ok"); },
+            onAbort: function (m) { termLog("Unity ABORT: " + m, "err"); },
+            errorhandler: function (message, filename, lineno) {
+              termLog("Unity error: " + message + (filename ? " (" + filename + ":" + lineno + ")" : ""), "err");
+              return false;    // keep Unity's default behaviour (alert) as well
+            }
+          }
+        });
+
+        const poll = setInterval(function () {
+          if (readyCalled) { clearInterval(poll); return; }
+          const canvas = document.querySelector("#gameContainer canvas");
+          if (canvas && canvas.width > 0) {
+            readyCalled = true;
+            clearInterval(poll);
+            termLog("Canvas detected, treating game as ready.", "info");
+            onGameReady();
+          }
+        }, 1000);
+
+        // Did Unity actually use the merged files?
+        setTimeout(function () {
+          Object.keys(redirectHits).forEach(function (name) {
+            const used = redirectHits[name] > 0;
+            const isAsm = /asm\.code/.test(name);
+            termLog("Merged " + name + " used by Unity: " + redirectHits[name] + " request(s)",
+              used ? "" : (isAsm ? "info" : "warn"));
+            if (!used && !isAsm) termLog("Unity never requested " + name + " - it may be loading something else from the CDN instead", "warn");
+          });
+        }, 20000);
+      } catch (err) {
+        aborted = true;
+        loadingText.textContent = "LOAD FAILED";
+        termLog("Fatal loading error: " + err.message, "err");
+      }
+    })();
+    </script>
+  </body>
+</html>
